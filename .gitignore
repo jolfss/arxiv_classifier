@@ -1,5 +1,9 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+.gpt2_model/
+.gpt2_tokenizer/
+*.pt
+vscode/
 *.py[cod]
 *$py.class
 
