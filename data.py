@@ -30,6 +30,7 @@ train_y : pd.DataFrame  = pd.read_csv('train_y.csv')
 #   categorization   #
 #--------------------#
 abbrev_to_info: Dict[str,tuple[int, str]] = {}
+label_to_info: Dict[int, tuple[str,str]] = {}
 """Maps each arXiv category abbreviation to its numeric and string representation.
 Example: "cs.AI" -> 120, "Artificial Intelligence" """
 with open("categories.txt", 'r') as file:
@@ -43,3 +44,4 @@ with open("categories.txt", 'r') as file:
         label = row.label
         (_, fullname) = abbrev_to_info[abbrev]
         abbrev_to_info[abbrev] = (label, fullname)
+        label_to_info[label] = (abbrev, fullname)
