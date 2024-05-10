@@ -33,13 +33,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 load_pretrained = True
 if load_pretrained:
-    match input("Which model would you like to use? (1:gpt2) (2:gpt2-xl) (3:specter) "):
-        case "1":
-            model_name = "gpt2"
-        case "2":
-            model_name = "gpt2-xl"
-        case "3":
-            model_name = "allenai/specter2_aug2023refresh_base"
+    model_name = "gpt2"
     print(F"Loading model {model_name}...")
     safe_model_name = model_name.replace("/","_")
     match model_name:
@@ -181,18 +175,18 @@ class EmbeddingDataset(Dataset):
     def __init__(self, x:pd.DataFrame, y:pd.DataFrame, 
                  embedder:Callable[[pd.DataFrame,Callable[[str,str],str],Optional[int],Optional[str]],List[torch.Tensor]], 
                  prompter:Callable[[str,str],str]=(lambda t,a: t + (tokenizer.sep_token if tokenizer.sep_token else "\n") + a),
-                 partial_credit=False, 
+                 partial_credit:Optional[float]=None, 
                  name=None,
                  batch_size=32):
         file = F".{model_name}_{name}_embeddings.pt".replace("/","_")
         # embed if embeddings have not been computed before
         if os.path.isfile(file):
-            print("Found pre-calculated embeddings, loading...")
+            #print("Found pre-calculated embeddings, loading...")
             x_batch_list = torch.load(file)
         else:
-            print("No pre-computed embeddings found, calculating...")
+            #print("No pre-computed embeddings found, calculating...")
             x_batch_list = embedder(x, prompter=prompter, batch_size=batch_size, name=file)
-        print("Embeddings received, creating dataset...")
+        #print("Embeddings received, creating dataset...")
         # de-batch x
         self.x = []
         for x_batch in x_batch_list:
@@ -208,8 +202,13 @@ class EmbeddingDataset(Dataset):
                 primary_label = label_indices[i]
                 secondary_labels = [lbl for lbl in secondary_labels if lbl != primary_label]
                 if secondary_labels:
-                    _y[i, secondary_labels] = 0.1
-                    _y[i, primary_label] = 1 - 0.1 * len(secondary_labels)
+                    for j, seclbl in enumerate(secondary_labels):
+                        # constant weighting
+                        #_y[i, secondary_labels] = partial_credit/len(secondary_labels)
+                        #_y[i, primary_label] = 1 - partial_credit
+                        # exponential weighting (assumes order of sub-subcategories)
+                        _y[i, seclbl] = partial_credit/(2**(j+1))
+                        _y[i, primary_label] = 1 - partial_credit/(2**len(secondary_labels))
         self.y = _y
 
     def __len__(self):
@@ -218,6 +217,51 @@ class EmbeddingDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
     
+class JointEmbeddingDataset(Dataset):
+    def __init__(self, embeddings1:str, 
+                 embeddings2:str, 
+                 embeddings3:str,
+                 y:pd.DataFrame, 
+                 partial_credit:Optional[float]=None, 
+                 name=None,
+                 batch_size=32):
+        x1_batch_list = torch.load(embeddings1) # (total_batches x 512) x 768 
+        x2_batch_list = torch.load(embeddings2) 
+        x3_batch_list = torch.load(embeddings3) # (total_batches x 32) x 1600
+        
+        x1_flat_list = [x1 for x1_batch in x1_batch_list for x1 in x1_batch.to(device)]
+        x2_flat_list = [x2 for x2_batch in x2_batch_list for x2 in x2_batch.to(device)]
+        x3_flat_list = [x3 for x3_batch in x3_batch_list for x3 in x3_batch.to(device)]
+        #print("Embeddings received, creating dataset...")
+        # de-batch x
+        self.x = []
+        for x1,x2,x3 in zip(x1_flat_list, x2_flat_list, x3_flat_list):
+            self.x.append(torch.cat((x1,x2,x3)))
+
+        label_indices = y['label'].to_numpy()
+        _y = torch.zeros((len(y), 151), device=device)
+        _y[torch.arange(len(y)), label_indices] = 1.0
+        if partial_credit:
+            secondary_indices = y['all_subfields_numeric'].apply(lambda x: [int(lbl) for lbl in str(x).split() if lbl.isdigit()])
+            for i, secondary_labels in enumerate(secondary_indices):
+                primary_label = label_indices[i]
+                secondary_labels = [lbl for lbl in secondary_labels if lbl != primary_label]
+                if secondary_labels:
+                    for j, seclbl in enumerate(secondary_labels):
+                        # constant weighting
+                        #_y[i, secondary_labels] = partial_credit/len(secondary_labels)
+                        #_y[i, primary_label] = 1 - partial_credit
+                        # exponential weighting (assumes order of sub-subcategories)
+                        _y[i, seclbl] = partial_credit/(2**(j+1))
+                        _y[i, primary_label] = 1 - partial_credit/(2**len(secondary_labels))
+        self.y = _y
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
 class EvaluationDataset(Dataset):
     def __init__(self, x:pd.DataFrame, 
                  embedder:Callable[[pd.DataFrame,Callable[[str,str],str],Optional[int],Optional[str]],List[torch.Tensor]], 
@@ -228,12 +272,12 @@ class EvaluationDataset(Dataset):
         
         # embed if embeddings have not been computed before
         if os.path.isfile(file):
-            print("Found pre-calculated embeddings, loading...")
+            #print("Found pre-calculated embeddings, loading...")
             x_batch_list = torch.load(file)
         else:
-            print("No pre-computed embeddings found, calculating...")
+            #print("No pre-computed embeddings found, calculating...")
             x_batch_list = embedder(x, prompter=prompter, batch_size=batch_size, name=file)
-        print("Embeddings received, creating dataset...")
+        #print("Embeddings received, creating dataset...")
         # de-batch x
         self.x = []
         for x_batch in x_batch_list:
@@ -245,18 +289,46 @@ class EvaluationDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.x[idx]
+    
+class JointEvaluationDataset(Dataset):
+    def __init__(self, 
+                 embeddings1,
+                 embeddings2,
+                 embeddings3,
+                 name=None,
+                 batch_size=32):
+        
+        x1_batch_list = torch.load(embeddings1) # (total_batches x 512) x 768 
+        x2_batch_list = torch.load(embeddings2) 
+        x3_batch_list = torch.load(embeddings3) # (total_batches x 32) x 1600
+        
+        x1_flat_list = [x1 for x1_batch in x1_batch_list for x1 in x1_batch.to(device)]
+        x2_flat_list = [x2 for x2_batch in x2_batch_list for x2 in x2_batch.to(device)]
+        x3_flat_list = [x3 for x3_batch in x3_batch_list for x3 in x3_batch.to(device)]
+        #print("Embeddings received, creating dataset...")
+        # de-batch x
+        self.x = []
+        for x1,x2,x3 in zip(x1_flat_list, x2_flat_list, x3_flat_list):
+            self.x.append(torch.cat((x1,x2,x3)))
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx]
 #------------#
 #   models   #
 #------------#
 
 class SimpleEmbeddingClassifier(nn.Module):
-    def __init__(self, din, dhidden, dout):
+    def __init__(self, din, dhidden, dout, p):
         super().__init__()
         self.fc1 = nn.Linear(din, dhidden, device=device)
+        self.d1 = nn.Dropout(p)
         self.fc2 = nn.Linear(dhidden, dout, device=device)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
+        x = self.d1(F.relu(self.fc1(x)))
         x = self.fc2(x)
         return x
 
@@ -332,7 +404,7 @@ def evaluate(model, dataloader):
 
 def save_predictions(ids, preds, filename="kaggle_submission.csv"):
   output_dict = {'id': ids, 'label': preds}
-  breakpoint()
+  #breakpoint()
   output = pd.DataFrame.from_dict(output_dict)
   output.to_csv(filename, index=False)
   return
